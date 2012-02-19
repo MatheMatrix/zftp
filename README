@@ -1,0 +1,27 @@
+这个是一个把文件直接存放在swift中的ftp,
+
+使用方法：
+1,
+	安装必要的依赖软件:
+a,安装配置swift，认证使用swauth，测试的版本是1.3.0（使用1.2.0不能正常上传文件）
+	https://github.com/gholt/swauth
+b,安装pyftplib，zftp是使用pyftplib写的，
+  http://code.google.com/p/pyftpdlib/
+
+2,
+	简单配置
+a,在swift中创建要使用的account, 用户名，密码，
+	swauth-add-user -A http://127.0.0.1:8080/auth/ -K swauthkey -a test tester testing
+b,修改zftpserver.py中使用的SWIFT_HOST, SWIFT_PORT, ACCOUNTS, ACCOUNT_ROOT_PATH, 并修改ftpserver要使用的ip地址和端口,默认使用的是127.0.0.1和1876，
+
+
+当前可用情况，
+	a, 可以使用lftp直接连接ftp使用，可以使用put, get, mkdir, rmdir, rm, mv, ls, cd, pwd, 
+	b, 在ubuntu里面打开一个文件夹后，在输入位置(location)的地方，也可以直接输入ftp://127.0.0.1:1876进行上传下载文件，在复制的时候还有点问题，
+
+
+实现思路：
+	写了一个swift_fs（是pyftplib里面abstractedf_fs的子类),在上传文件时，直接把文件创建在swift中，
+	并在本地文件系统中创建一个文件，里面存放的该文件对应在swift中的文件名称(uuid), 大小信息。
+	写修改了认证的方法，在添加用户的时候，会在本地和swift中创建一个对应的container，
+	现在在设置用户的homedir时只能设置为一个级别的目录，不能是/a/b/只能是/a或a。
