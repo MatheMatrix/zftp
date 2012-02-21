@@ -3,12 +3,11 @@
 
 import json
 import os
-import hashlib
 import urlparse
 import uuid
 
-from pyftpdlib import ftpserver
 from eventlet.green import socket, httplib
+from pyftpdlib import ftpserver
 from urllib import quote
 
 SWIFT_HOST = '192.168.56.186'
@@ -16,6 +15,7 @@ SWIFT_PORT = '8080'
 ACCOUNTS = {'account':'test', 'user':'tester', 'password':'testing'}
 ACCOUNT_ROOT_PATH = '/var/www/zftp/'
 
+SINGLE = {'name':None, 'size':None}
 
 class Swift_Proxy():
     '''用来和swift通信'''
@@ -53,15 +53,13 @@ class Swift_Proxy():
 
     def delete_object(self, container, obj):
         """Wrapper for :func:`delete_object`"""
-        path = '%s/%s/%s' % (self.parse.path, quote(container), quote(obj))
-        print path
+        path = '%s/%s/%s' % (self.parse.path, quote(container), quote(str(obj)))
         conn = httplib.HTTPConnection('%s:%s'%(SWIFT_HOST, SWIFT_PORT))
         conn.request('DELETE', path, '', {'X-Auth-Token': self.x_auth_token})
         resp = conn.getresponse()
         resp.read()
         if resp.status < 200 or resp.status >= 300:
-            raise OSError('Object DELETE failed', resp.status, 
-                   resp.reason, resp.msg, container, obj)
+            print 'delete_object, error, container:%s, obj:%s' % (container, obj)
         print 'delete_object, ok'
 
 sproxy = Swift_Proxy()
@@ -73,21 +71,25 @@ def path2container(path):
     return path[_prefix:].lstrip('/').split('/')[0]
 
 def filepath2single(path):
-    '''从给出的path得到对应的在swift中存放用的uuid，objname '''
-    single = None
-    with open(path) as f:
-        single = json.load(f)
-    return single
+    '''
+        从给出的path得到对应的在swift中存放用的uuid，objname
+    '''
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except ValueError, msg:
+        print 'path:%s, its json was broken.'%(path)
+        #raise OSError('load json error, %s'%(msg))
+    return SINGLE
 
 def filepath2uuid(path):
-    '''从给出的path得到对应的在swift中存放用的uuid，objname '''
     return filepath2single(path)['name']
 
 class Fake_Fd():
         '''把和swift的连接封装成一个类fd，让ftplib来使用，
         实现write(), read(), closed(), fileno(), name,  '''
         def __init__(self, filepath, mode):
-            self.single = {'name':None, 'size':None}
+            self.single = SINGLE
             self.filepath = filepath
             self.mode = mode
             self.name = os.path.basename(filepath)
@@ -100,10 +102,8 @@ class Fake_Fd():
                 self.single = filepath2single(self.filepath)
             else:
                 self.single = {'name':str(uuid.uuid1()), 'size':0}
-            print self.single
 
             path = os.path.join(sproxy.parse.path, self.container, self.single['name'])
-            print path
             conn = httplib.HTTPConnection('%s:%s'%(SWIFT_HOST, SWIFT_PORT))
 
             if self.mode == 'wb':
@@ -124,25 +124,23 @@ class Fake_Fd():
                 self.r1 = self.conn.getresponse()
 
         def write(self, chunk):
-            '''往swift里面写'''
-            if chunk is None:
-                print 'send chunk zero'
-                self.conn.send("0\r\n\r\n")
             print 'send chunk'
+            if chunk is None:
+                self.conn.send("0\r\n\r\n")
             self.conn.send('%x\r\n%s\r\n'%(len(chunk), chunk))
             self._size = len(chunk)
 
         def read(self, buffer_size):
-            print 'read:', buffer_size
+            print 'read chunk:', buffer_size
             return self.r1.read(buffer_size)
 
         def close(self):
             '''关闭的时候，在本地创建一个文件，把文件的属性标记上'''
             print 'close conn'
-            self.conn.send("0\r\n\r\n")
             if self.is_write:
+                self.conn.send("0\r\n\r\n")
                 r1 = self.conn.getresponse()
-                print r1.msg, r1.status, r1.reason
+                #print r1.msg, r1.status, r1.reason
                 self.single['size'] = self._size
                 with open(self.filepath, self.mode) as f:
                     f.write(json.dumps(self.single))
@@ -166,7 +164,6 @@ class ZAuthorizer(ftpserver.DummyAuthorizer):
         container = homedir
         account = ACCOUNTS['account']
         homedir = os.path.join(ACCOUNT_ROOT_PATH, account, homedir.lstrip('/'))
-        print 'add user homedir:', homedir
         if not os.path.isdir(homedir):
             os.makedirs(homedir)
         sproxy.put_container(container)
@@ -179,9 +176,9 @@ class Swift_Filesystem(ftpserver.AbstractedFS):
     def __init__(self, root, cmd_channel):
         ftpserver.AbstractedFS.__init__(self, root, cmd_channel)
         self.cwd = '/'
+        self.log = self.cmd_channel.log
 
     def open(self, filename, model):
-        print filename
         print 'in open:filename:%s, model:%s'%(filename, model)
         return Fake_Fd(filename, model)
     
@@ -194,17 +191,20 @@ class Swift_Filesystem(ftpserver.AbstractedFS):
 
     def getsize(self, path):
         return filepath2single(path)['size']
-    
-    def rmdir(self, path):
-        """Remove the specified directory."""
-        #for p, d, f in os.walk(path):
-            #print p, d, f
-            #for _f in f:
-                #filepath = os.path.join(p, _f)
-                #print 'rmdir', _f, filepath
-                #self.remove(filepath, delete_local=False)
-        super(Swift_Filesystem, self).rmdir(path)
 
+    def stat(self, path):
+        return self.lstat(path)
+
+    def lstat(self, path):
+        statinfo = os.stat(path)
+        keys = [x for x in dir(statinfo) if x.startswith('st_')]
+        fake_stat = lambda x:x
+        for i in keys:
+            setattr(fake_stat, i, getattr(statinfo, i))
+        if os.path.isfile(path):
+            fake_stat.st_size = self.getsize(path)
+        return fake_stat
+  
 def main():
     zauthorizer = ZAuthorizer()
     test = ['ftptester', 'ftptesting', '/container1', 'elradfmw']
